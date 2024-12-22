@@ -2,49 +2,49 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"sync"
-	"time"
 )
 
 func discoverer(
-	newQueue chan<- SyncItem,
+	db *sql.DB,
 	waitGroup *sync.WaitGroup,
 	ctx context.Context,
 	client *http.Client,
-	prevMaxItem uint64) {
+	prevMaxItemId uint64) {
+	waitGroup.Add(1)
 	defer waitGroup.Done()
+	defer log.Println("Discoverer finished")
 
-	var maxItem = prevMaxItem
+	var maxItemId = prevMaxItemId
 
-	log.Printf("Starting at id %d", prevMaxItem+1)
+	log.Printf("Starting at id %d", prevMaxItemId+1)
 
-	for {
-		if err := fetchMaxItem(&maxItem, client); err != nil {
-			log.Printf("Error fetching max item: %v\n", err)
-		}
+	insertStatement, err := createInsertNewItemStatement(db)
+	if err != nil {
+		log.Fatalf("Failed to create insert statement: %v", err)
+	}
+	defer insertStatement.Close()
 
-		log.Printf("Max item id: %d", maxItem)
+	if err := fetchMaxItem(&maxItemId, client); err != nil {
+		log.Printf("Error fetching max item: %v\n", err)
+	}
 
-		for i := prevMaxItem + 1; i <= maxItem; i++ {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				newQueue <- SyncItem{ID: i}
-			}
-		}
+	log.Printf("Max item id: %d", maxItemId)
 
-		prevMaxItem = maxItem
-
+	for i := prevMaxItemId + 1; i <= maxItemId; i++ {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Second):
-			continue
+		default:
+			_, err := insertStatement.Exec(i)
+			if err != nil {
+				log.Fatalf("Failed to insert item %d: %v", i, err)
+			}
 		}
 	}
 }

@@ -15,27 +15,32 @@ const (
 	Sleep
 )
 
-func runEnqueueExistingItemsBatch(refreshQueue chan<- SyncItem, db *sql.DB) SyncStatus {
-	itemIDs, err := getNextItemsToEnqueue(db)
+func runEnqueueExistingItemsBatch(refreshQueue chan<- SyncItem, hideItemStatement *sql.Stmt, getNextItemsToEnqueueStatement *sql.Stmt) SyncStatus {
+
+	rows, err := getNextItemsToEnqueueStatement.Query()
 	if err != nil {
 		log.Printf("Failed to get next items to sync: %v", err)
 		return Sleep
 	}
 
-	statement, err := createStatementToMakeItemNotVisible(db)
-	if err != nil {
-		log.Printf("Failed to create statement to hide items: %v", err)
-		return Sleep
-	}
-	defer statement.Close()
+	defer rows.Close()
 
-	nextAvailableTime := time.Now().UTC().Add(5 * time.Minute)
+	var itemIDs []uint64
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			log.Printf("Failed to scan item id: %v", err)
+			continue
+		}
+		itemIDs = append(itemIDs, id)
+	}
+
+	nextAvailableTime := time.Now().UTC().Add(5 * time.Minute).Format("2006-01-02 15:04:05")
 
 	for _, itemId := range itemIDs {
 		refreshQueue <- SyncItem{ID: itemId}
 
-		_, err = statement.Exec(nextAvailableTime, itemId)
-
+		_, err = hideItemStatement.Exec(nextAvailableTime, itemId)
 		if err != nil {
 			log.Printf("Failed set item not visible: %v", err)
 			continue
@@ -50,16 +55,37 @@ func runEnqueueExistingItemsBatch(refreshQueue chan<- SyncItem, db *sql.DB) Sync
 }
 
 func refresher(refreshQueue chan<- SyncItem, db *sql.DB, wg *sync.WaitGroup, ctx context.Context) {
+	wg.Add(1)
 	defer wg.Done()
+	defer log.Println("Refresher finished")
+
+	idleStartTime := time.Now()
+
+	hideItemStatement, err := createHideItemStatement(db)
+	if err != nil {
+		log.Fatalf("Failed to create statement to hide items: %v", err)
+	}
+	defer hideItemStatement.Close()
+
+	getNextItemsToEnqueueStatement, err := createGetNextItemsToEnqueueStatement(db)
+	if err != nil {
+		log.Fatalf("Failed to create statement to get next items to enqueue: %v", err)
+	}
+	defer getNextItemsToEnqueueStatement.Close()
 
 	for {
-		status := runEnqueueExistingItemsBatch(refreshQueue, db)
+		status := runEnqueueExistingItemsBatch(refreshQueue, hideItemStatement, getNextItemsToEnqueueStatement)
 
-		if status == Sleep {
+		if status == Work {
+			idleStartTime = time.Now()
+		} else if status == Sleep {
+			if time.Since(idleStartTime) >= 10*time.Second {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(10 * time.Second):
+			case <-time.After(1 * time.Second):
 			}
 		}
 

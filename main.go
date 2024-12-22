@@ -55,7 +55,7 @@ func main() {
 		Transport: transport,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	globalContext, cancelGlobalContext := context.WithCancel(context.Background())
 
 	sigint := make(chan os.Signal, 1)
 	signal.Notify(sigint, os.Interrupt, syscall.SIGINT)
@@ -63,7 +63,7 @@ func main() {
 	go func() {
 		<-sigint
 		fmt.Println("Shutting down")
-		cancel()
+		cancelGlobalContext()
 	}()
 
 	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?cache=shared&_foreign_keys=true&_journal_mode=WAL&mode=rwc", config.DBFileName))
@@ -80,45 +80,41 @@ func main() {
 		log.Fatalf("Error creating tables: %v", err)
 	}
 
-	var enqueueGroup sync.WaitGroup
-	newQueue := make(chan SyncItem, 100)
+	var producerGroup sync.WaitGroup
 	refreshQueue := make(chan SyncItem, 100)
 
-	maxItemInDb, err := getMaxItemID(db)
+	maxItemId, err := getMaxItemID(db)
 	if err != nil {
 		log.Fatalf("Error getting max item ID: %v", err)
 	}
 
-	startingId := max(0, maxItemInDb-min(maxItemInDb, 1_000))
+	go discoverer(db, &producerGroup, globalContext, httpClient, maxItemId)
+	go refresher(refreshQueue, db, &producerGroup, globalContext)
 
-	enqueueGroup.Add(1)
-	go backillVerifier(newQueue, &enqueueGroup, ctx, db, startingId)
-
-	enqueueGroup.Add(1)
-	go discoverer(newQueue, &enqueueGroup, ctx, httpClient, startingId)
-
-	enqueueGroup.Add(1)
-	go refresher(refreshQueue, db, &enqueueGroup, ctx)
-
-	var newProcessingCount atomic.Uint64
 	var refreshProcessingCount atomic.Uint64
 
-	enqueueGroup.Add(1)
-	go showProgress(&newProcessingCount, &refreshProcessingCount, &enqueueGroup, ctx, newQueue, refreshQueue)
+	progressContext, cancelProgressContext := context.WithCancel(context.Background())
+	var progressGroup sync.WaitGroup
+	go showProgress(&refreshProcessingCount, &progressGroup, progressContext, refreshQueue)
 
 	var consumerGroup sync.WaitGroup
 
 	for i := 0; i < config.NumWorkers; i++ {
 		consumerGroup.Add(1)
-		go syncer(newQueue, refreshQueue, db, &consumerGroup, &newProcessingCount, &refreshProcessingCount, httpClient)
+		go syncer(refreshQueue, db, &consumerGroup, &refreshProcessingCount, httpClient)
 	}
 
 	log.Println("Processing")
 
-	enqueueGroup.Wait()
+	producerGroup.Wait()
 
-	close(newQueue)
 	close(refreshQueue)
 
 	consumerGroup.Wait()
+
+	log.Println("Consumers finished")
+
+	cancelProgressContext()
+
+	progressGroup.Wait()
 }

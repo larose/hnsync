@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -22,22 +21,25 @@ type hnItem struct {
 	Time int64
 }
 
-func computeNextSyncDuration(now, itemTime time.Time) time.Duration {
+type NextSync struct {
+	Duration  time.Duration
+	NeverSync bool
+}
+
+func computeNextSyncDuration(now, itemTime time.Time) NextSync {
 	itemAgeHours := now.Sub(itemTime).Hours()
 
 	switch {
 	case itemAgeHours < 1:
-		return 20 * time.Minute
+		return NextSync{Duration: 20 * time.Minute}
 	case itemAgeHours < 3:
-		return 1 * time.Hour
+		return NextSync{Duration: 1 * time.Hour}
 	case itemAgeHours < 24:
-		return 3 * time.Hour
-	case itemAgeHours < 7*24:
-		return 24 * time.Hour
+		return NextSync{Duration: 3 * time.Hour}
+	case itemAgeHours < 90*24:
+		return NextSync{Duration: 24 * time.Hour}
 	default:
-		days := time.Duration(90*24) * time.Hour              // 90 days
-		jitter := time.Duration(rand.Intn(14*24)) * time.Hour // Between 0 and 14 days
-		return days + jitter
+		return NextSync{NeverSync: true}
 	}
 }
 
@@ -62,17 +64,8 @@ func downloadItem(id uint64, client *http.Client) ([]byte, error) {
 	return bodyBytes, nil
 }
 
-func syncItem(id uint64, db *sql.DB, processingCount *atomic.Uint64, client *http.Client) error {
+func syncItem(id uint64, processingCount *atomic.Uint64, client *http.Client, updateItemStatement *sql.Stmt) error {
 	processingCount.Add(1)
-
-	needSync, err := itemNeedSync(db, id)
-	if err != nil {
-		return err
-	}
-
-	if !needSync {
-		return nil
-	}
 
 	data, err := downloadItem(id, client)
 	if err != nil {
@@ -86,33 +79,38 @@ func syncItem(id uint64, db *sql.DB, processingCount *atomic.Uint64, client *htt
 	}
 
 	itemTime := time.Unix(item.Time, 0).UTC()
-	nextSyncDuration := computeNextSyncDuration(time.Now().UTC(), itemTime)
+	nextSync := computeNextSyncDuration(time.Now().UTC(), itemTime)
 
-	return upsertItem(db, id, string(data), nextSyncDuration)
+	var nextSyncTime string
+	if nextSync.NeverSync {
+		nextSyncTime = "3000-01-01 00:00:00"
+	} else {
+		nextSyncTime = time.Now().UTC().Add(nextSync.Duration).Format("2006-01-02 15:04:05")
+	}
+
+	_, err = updateItemStatement.Exec(string(data), nextSyncTime, id)
+
+	return err
 }
 
-func syncer(newQueue <-chan SyncItem, refreshQueue <-chan SyncItem, db *sql.DB, wg *sync.WaitGroup, newProcessingCount *atomic.Uint64, refreshProcessingCount *atomic.Uint64, client *http.Client) {
+func syncer(refreshQueue <-chan SyncItem, db *sql.DB, wg *sync.WaitGroup, refreshProcessingCount *atomic.Uint64, client *http.Client) {
 	defer wg.Done()
 
-	for newQueue != nil || refreshQueue != nil {
+	updateItemStatement, err := createUpdateItemStatement(db)
+	if err != nil {
+		log.Fatalf("Failed to create statement to update items: %v", err)
+	}
+
+	for {
 		select {
-		case task, ok := <-newQueue:
+		case task, ok := <-refreshQueue:
 			if !ok {
-				newQueue = nil
-			} else if err := syncItem(task.ID, db, newProcessingCount, client); err != nil {
+				return
+			} else if err := syncItem(task.ID, refreshProcessingCount, client, updateItemStatement); err != nil {
 				log.Printf("Failed to sync item %d: %v", task.ID, err)
 			}
 		default:
-			select {
-			case task, ok := <-refreshQueue:
-				if !ok {
-					refreshQueue = nil
-				} else if err := syncItem(task.ID, db, refreshProcessingCount, client); err != nil {
-					log.Printf("Failed to sync item %d: %v", task.ID, err)
-				}
-			default:
-				time.Sleep(10 * time.Second)
-			}
+			time.Sleep(10 * time.Second)
 		}
 	}
 }

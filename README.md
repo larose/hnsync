@@ -1,6 +1,6 @@
 # hnsync
 
-`hnsync` is a Go application that syncs Hacker News items to a local SQLite database. It monitors new items in near real-time and periodically updates existing ones, providing a simple way to work with Hacker News data locally.
+`hnsync` is a Go application that syncs Hacker News items to a local SQLite database. It fetches HN items (stories and comments) up to the [maxitem](https://hacker-news.firebaseio.com/v0/maxitem.json) from the HN API and then exits. Recent items are also periodically refreshed during the run. For near real-time updates, simply restart `hnsync` upon exit.
 
 ## Prerequisites
 
