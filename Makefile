@@ -13,3 +13,11 @@ run:
 .PHONY: profile
 profile:
 	go tool pprof http://localhost:6060/debug/pprof/profile?seconds=10
+
+.PHONY: build
+build:
+	go build -o hnsync
+
+.PHONY: build-release
+build-release:
+	go build -ldflags="-s -w" -trimpath -o hnsync
