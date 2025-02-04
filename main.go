@@ -88,7 +88,9 @@ func main() {
 		log.Fatalf("Error getting max item ID: %v", err)
 	}
 
+	producerGroup.Add(1)
 	go discoverer(db, &producerGroup, globalContext, httpClient, maxItemId)
+	producerGroup.Add(1)
 	go refresher(refreshQueue, db, &producerGroup, globalContext)
 
 	var refreshProcessingCount atomic.Uint64

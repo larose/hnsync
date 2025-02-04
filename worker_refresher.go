@@ -55,7 +55,6 @@ func runEnqueueExistingItemsBatch(refreshQueue chan<- SyncItem, hideItemStatemen
 }
 
 func refresher(refreshQueue chan<- SyncItem, db *sql.DB, wg *sync.WaitGroup, ctx context.Context) {
-	wg.Add(1)
 	defer wg.Done()
 	defer log.Println("Refresher finished")
 
