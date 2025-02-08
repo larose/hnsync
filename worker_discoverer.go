@@ -16,7 +16,6 @@ func discoverer(
 	ctx context.Context,
 	client *http.Client,
 	prevMaxItemId uint64) {
-	waitGroup.Add(1)
 	defer waitGroup.Done()
 	defer log.Println("Discoverer finished")
 
