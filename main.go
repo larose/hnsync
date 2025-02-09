@@ -15,8 +15,29 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
+
+// setPersistWAL enables SQLITE_FCNTL_PERSIST_WAL on the database connection
+func setPersistWAL(db *sql.DB) error {
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("getting connection: %w", err)
+	}
+	defer conn.Close()
+
+	err = conn.Raw(func(driverConn interface{}) error {
+		sqliteConn, ok := driverConn.(*sqlite3.SQLiteConn)
+		if !ok {
+			return fmt.Errorf("unexpected driver connection type")
+		}
+		return sqliteConn.SetFileControlInt("main", sqlite3.SQLITE_FCNTL_PERSIST_WAL, 1)
+	})
+	if err != nil {
+		return fmt.Errorf("setting SQLITE_FCNTL_PERSIST_WAL: %w", err)
+	}
+	return nil
+}
 
 type Config struct {
 	DBFileName      string
@@ -71,6 +92,10 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+
+	if err := setPersistWAL(db); err != nil {
+		log.Fatalf("Error setting SQLITE_FCNTL_PERSIST_WAL: %v", err)
+	}
 
 	// https://github.com/mattn/go-sqlite3/issues/274
 	db.SetMaxOpenConns(1)
